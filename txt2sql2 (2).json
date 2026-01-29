@@ -1,0 +1,760 @@
+{
+  "name": "txt2sql2",
+  "nodes": [
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-3.5-turbo",
+          "mode": "list",
+          "cachedResultName": "gpt-3.5-turbo"
+        },
+        "options": {}
+      },
+      "id": "f806da83-35df-4d37-a267-e3c0c8eb5222",
+      "name": "LLM Table Selector1",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        -960,
+        -80
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "rWng8HjwFzEyGRf0",
+          "name": "text2sql"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.userQuery }}",
+        "options": {
+          "systemMessage": "=You are a table selector. Given a user question and list of database tables, identify the 5-10 most relevant tables.\n\nRULES:\n1. Scan ALL tables - prioritize based on table descriptions/comments over names\n2. Include: PRIMARY tables (direct data), SECONDARY tables (for JOINs), SUPPORTING tables (context)\n3. Maximum 10 tables - if more seem relevant, prioritize PRIMARY > SECONDARY > SUPPORTING\n4. When uncertain and under 10 tables, include the table\n5. Look for junction/mapping tables when question involves multiple entities\n\nAVAILABLE TABLES:\n{{ $json.tableListText }}\n\nUSER QUESTION:\n{{ $json.userQuery }}\n\nOUTPUT (valid JSON only):\n{\n  \"selected_tables\": [\"table1\", \"table2\"],\n  \"reasoning\": \"Brief explanation of why each table was selected\",\n  \"confidence\": \"high/medium/low\",\n  \"table_count\": 2\n}\n\nIf no relevant tables:\n{\n  \"selected_tables\": [],\n  \"reasoning\": \"No relevant tables found. Searched: [list 3-4 table names to prove scanning]\",\n  \"confidence\": \"high\",\n  \"table_count\": 0\n}"
+        }
+      },
+      "id": "42da2f8f-8793-4349-8640-a2c4a7c2191b",
+      "name": "Select Relevant Tables1",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        -960,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "let rawOutput = $json.text || $json.output || JSON.stringify($json);\nrawOutput = rawOutput.replace(/```[a-zA-Z]*\\n?([\\s\\S]*?)```/g, '$1').trim();\n\nlet response;\ntry {\n  const jsonMatch = rawOutput.match(/\\{[\\s\\S]*\\}/);\n  response = JSON.parse(jsonMatch[0]);\n} catch (err) {\n  throw new Error(`Parse failed: ${err.message}`);\n}\n\nconst selectedTables = response.selected_tables || [];\n\nif (selectedTables.length === 0) {\n  return [{\n    json: {\n      no_tables_found: true,\n      message: 'Could not identify relevant tables',\n      status: 'no_table'\n    }\n  }];\n}\n\nconst upstream = $('Format Table List').first().json;\nlet tableNamesForSQL;\n\nif (upstream.dbType === 'postgresql') {\n  // PostgreSQL: Create proper array literal with text casting\n  const tableList = selectedTables.map(t => `${t}`).join(','); // No quotes in the array literal\n  tableNamesForSQL = `'{${tableList}}'::text[]`;  // Creates: '{table1,table2}'::text[]\n  \n  console.log('PostgreSQL tableNamesForSQL:', tableNamesForSQL);\n} else {\n  // MySQL: Simple comma-separated list\n  tableNamesForSQL = selectedTables.map(t => `'${t}'`).join(', ');\n}\n\nconsole.log('=== Validate Table Selection Debug ===');\nconsole.log('dbType:', upstream.dbType);\nconsole.log('dbSchema:', upstream.dbSchema);\nconsole.log('dbName:', upstream.dbName);\nconsole.log('selectedTables:', selectedTables);\nconsole.log('tableNamesForSQL:', tableNamesForSQL);\n\nreturn [{\n  json: {\n    selectedTables,\n    tableNamesForSQL,\n    userQuery: upstream.userQuery,\n    dbType: upstream.dbType,\n    dbSchema: upstream.dbSchema,  \n    dbName: upstream.dbName,\n    requestType: upstream.requestType,\n    lastSQL: upstream.lastSQL,\n    schemaTemplate: upstream.schemaTemplate\n  }\n}];"
+      },
+      "id": "ca29a71e-a5ce-4c3e-9b3e-a059fe8cc34c",
+      "name": "Validate Table Selection1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -592,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n    c.TABLE_SCHEMA,\n    c.TABLE_NAME,\n    c.COLUMN_NAME,\n    c.DATA_TYPE,\n    c.IS_NULLABLE,\n    c.COLUMN_KEY,\n    c.COLUMN_COMMENT,\n    t.TABLE_COMMENT\nFROM INFORMATION_SCHEMA.COLUMNS c\nJOIN INFORMATION_SCHEMA.TABLES t\n    ON c.TABLE_SCHEMA = t.TABLE_SCHEMA\n    AND c.TABLE_NAME = t.TABLE_NAME\nWHERE c.TABLE_SCHEMA = '{{ $('Validate Table Selection1').item.json.dbName }}'\n  AND c.TABLE_NAME IN ({{ $('Validate Table Selection1').item.json.tableNamesForSQL }})\nORDER BY c.TABLE_NAME, c.ORDINAL_POSITION;",
+        "options": {}
+      },
+      "id": "43b7b9c3-da5c-4871-bfff-fbbb844def3a",
+      "name": "Read Filtered Schema1",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        -2096,
+        208
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "RDuihR42NYbiVcxZ",
+          "name": "MySQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all();\n\nconsole.log('=== Build Filtered Schema JSON1 Debug ===');\nconsole.log('DB Type:', $('Validate Table Selection1').first().json.dbType);\nconsole.log('Input rows count:', rows.length);\n\nif (rows.length === 0) {\n  const upstream = $('Validate Table Selection1').first().json;\n  throw new Error(`❌ Schema query returned ZERO rows for ${upstream.dbType}. Schema: ${upstream.dbSchema}, Tables: ${upstream.selectedTables.join(', ')}`);\n}\n\nconsole.log('First row:', JSON.stringify(rows[0]?.json, null, 2));\n\nconst schemaData = rows.map(r => r.json);\n\nconst tableMap = {};\nschemaData.forEach(col => {\n  // Use lowercase column names for PostgreSQL\n  const tableName = col.table_name || col.TABLE_NAME;\n  \n  if (!tableName) {\n    console.error('❌ Row missing table_name:', col);\n    return;\n  }\n  \n  if (!tableMap[tableName]) {\n    tableMap[tableName] = {\n      table_name: tableName,\n      table_comment: col.table_comment || col.TABLE_COMMENT || '',\n      columns: []\n    };\n  }\n  \n  tableMap[tableName].columns.push({\n    name: col.column_name || col.COLUMN_NAME,\n    type: col.data_type || col.DATA_TYPE,\n    nullable: (col.is_nullable || col.IS_NULLABLE) === 'YES',\n    key: col.column_key || col.COLUMN_KEY || '',\n    comment: col.column_comment || col.COLUMN_COMMENT || ''\n  });\n});\n\nconst tableCount = Object.keys(tableMap).length;\nconsole.log(`✓ Built schema for ${tableCount} tables`);\n\nif (tableCount === 0) {\n  throw new Error('❌ tableMap is empty after processing rows');\n}\n\nconst schemaText = JSON.stringify(Object.values(tableMap), null, 2);\nconsole.log('✓ Schema text length:', schemaText.length, 'characters');\n\nconst upstream = $('Validate Table Selection1').first().json;\n\nreturn [{\n  json: {\n    userQuery: upstream.userQuery,\n    chatInput: upstream.userQuery,\n    dbType: upstream.dbType,\n    dbName: upstream.dbName,\n    dbSchema: upstream.dbSchema,\n    requestType: upstream.requestType,\n    lastSQL: upstream.lastSQL,\n    schemaTemplate: upstream.schemaTemplate,\n    selectedTables: upstream.selectedTables,\n    availableTables: upstream.selectedTables.join(', '),\n    schemaText: schemaText\n  }\n}];"
+      },
+      "id": "e40c09ce-fce0-475f-894d-50ed067beacb",
+      "name": "Build Filtered Schema JSON1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1776,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4.1-mini"
+        },
+        "options": {}
+      },
+      "id": "b4a5b7b3-ec94-43f4-b028-18d022710673",
+      "name": "Generate SQL (LLM)1",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        -1216,
+        464
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "rWng8HjwFzEyGRf0",
+          "name": "text2sql"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.chatInput }}",
+        "options": {
+          "systemMessage": "=You generate SQL for MySQL and PostgreSQL databases.\n\nDB: {{ $json.dbType }} | NAME: {{ $json.dbName }} | SCHEMA: {{ $json.dbSchema }}\nTABLES: {{ $json.availableTables }}\n\n{{ $json.schemaText }}\n\nQUERY: {{ $json.chatInput }}\n{{ $json.requestType === 'modification' ? 'MODIFY SQL: ' + ($json.lastSQL || 'N/A') : '' }}\n{{ $json.requestType === 'elaboration' ? 'FIX SQL (0 rows): ' + ($json.lastSQL || 'N/A') : '' }}\n\nRULES:\n1. VALUE EXTRACTION\n   Extract literals: \"vendor 5\" → WHERE vendor_id = 5, \"Mumbai\" → WHERE city = 'Mumbai'\n   No value? No WHERE. Never use :param, ?, $1. No incomplete WHERE (WHERE id =).\n\n2. SCHEMA VALIDATION\n   ONLY use columns/tables from schema. Return ERROR if missing with alternatives.\n\n3. DATABASE SYNTAX\n   PostgreSQL: schema.table, ILIKE, CURRENT_DATE, col::type, TRUE/FALSE\n   MySQL: table, LIKE, CURDATE(), CONCAT(), TRUE/FALSE or 1/0\n\n4. JOINS\n   Use explicit INNER/LEFT/RIGHT JOIN with aliases. Never generic JOIN or comma-joins.\n   Default LEFT JOIN unless \"only\" specified.\n\n5. AGGREGATION\n   Use GROUP BY with SUM/COUNT/AVG. Include all non-aggregated columns in GROUP BY.\n\n6. DATES\n   MySQL: YEAR(CURDATE()), CURDATE() - INTERVAL 30 DAY\n   PostgreSQL: EXTRACT(YEAR FROM CURRENT_DATE), CURRENT_DATE - INTERVAL '30 days'\n\n7. TEXT SEARCH\n   Match multiple fields: first_name, last_name, and concatenated full name.\n   PostgreSQL uses ILIKE, MySQL uses LIKE.\n\n8. SAFETY\n   Add LIMIT 100 if missing. Single-line SQL (no \\n).\n\n9. MODIFICATION MODE\n   Start with previous SQL. Change ONLY what user requested. Preserve all other logic.\n\n10. ELABORATION MODE\n    Fix: Add schema prefix (PG), change LIKE→ILIKE (PG), remove restrictive filters, check column names.\n\nOUTPUT (JSON):\n{\"sql_query\": \"SELECT...\", \"explanation\": \"...\", \"tables_used\": [\"...\"], \"database_type\": \"...\", \"confidence\": \"high\"}\n\nERROR: {\"sql_query\": \"ERROR\", \"message\": \"Column 'X' not found. Available: ...\"}\n\nEXAMPLES:\n1. \"vendor 5\" → SELECT v.* FROM vendors v WHERE v.vendor_id = 5 LIMIT 100;\n2. \"active vendors + GST\" (PG) → SELECT v.vendor_id, vg.gst_no FROM public.vendors v LEFT JOIN public.vendor_gst vg ON v.vendor_id = vg.vendor_id WHERE v.active = TRUE LIMIT 100;\n3. \"vendors per city\" → SELECT v.city, COUNT(*) FROM vendors v GROUP BY v.city ORDER BY COUNT(*) DESC LIMIT 100;\n4. Modification: Previous \"SELECT id, name\" + \"add city\" → SELECT id, name, city ..."
+        }
+      },
+      "id": "8dd6232b-770c-4516-bce7-450c65fe3a1f",
+      "name": "Universal SQL Agent1",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        -1216,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the raw output from the AI agent\nlet rawOutput = $json.text || $json.output || JSON.stringify($json);\n\n// Remove markdown code blocks if present\nrawOutput = rawOutput.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n\nlet response;\ntry {\n  // Try to find JSON object in the response\n  const jsonMatch = rawOutput.match(/\\{[\\s\\S]*\\}/);\n  if (!jsonMatch) {\n    throw new Error('No JSON object found in AI response');\n  }\n  response = JSON.parse(jsonMatch[0]);\n} catch (err) {\n  // If parsing fails, return error with the raw output for debugging\n  return [{\n    json: {\n      error: true,\n      message: `Failed to parse AI response: ${err.message}`,\n      raw_output: rawOutput,\n      debug: 'Check the AI agent output format'\n    }\n  }];\n}\n\n// Check if AI returned an error\nif (response.sql_query === 'ERROR') {\n  return [{\n    json: {\n      error: true,\n      message: response.message || 'SQL generation failed',\n      details: response\n    }\n  }];\n}\n\n// Get the SQL query\nlet sqlQuery = response.sql_query;\n\nif (!sqlQuery || typeof sqlQuery !== 'string') {\n  return [{\n    json: {\n      error: true,\n      message: 'No valid SQL query in response',\n      response: response\n    }\n  }];\n}\n\n// Clean the SQL query - remove any newlines that might break it\nsqlQuery = sqlQuery.replace(/\\n/g, ' ').replace(/\\s+/g, ' ').trim();\n\n// Safety check - only allow SELECT and WITH queries\nconst upperQuery = sqlQuery.toUpperCase().trim();\nconst isValidQuery = upperQuery.startsWith('SELECT') || upperQuery.startsWith('WITH');\n\nif (!isValidQuery) {\n  return [{\n    json: {\n      error: true,\n      message: 'Only SELECT and WITH (CTE) queries are allowed',\n      attempted_query: sqlQuery\n    }\n  }];\n}\n\n// Add LIMIT if not present\nif (!upperQuery.includes('LIMIT')) {\n  sqlQuery = sqlQuery.trim().replace(/;$/, '') + ' LIMIT 100';\n}\n\n// Add semicolon if missing\nif (!sqlQuery.trim().endsWith(';')) {\n  sqlQuery = sqlQuery.trim() + ';';\n}\n\n// Get database type from upstream data\nconst upstream = $('Build Filtered Schema JSON1').first().json;\n\nreturn [{\n  json: {\n    sqlQuery: sqlQuery,\n    explanation: response.explanation || 'No explanation provided',\n    tablesUsed: response.tables_used || [],\n    confidence: response.confidence || 'medium',\n    dbType: upstream.dbType,\n    dbName: upstream.dbName,\n    dbSchema: upstream.dbSchema || upstream.dbName\n  }\n}];"
+      },
+      "id": "09979d27-30b5-4b1b-85d4-b4fbdadd0cae",
+      "name": "Validate SQL Safety1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -512,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.sqlQuery }}",
+        "options": {}
+      },
+      "id": "82c8e563-0d76-4740-8116-fbe5ddd00386",
+      "name": "Execute Generated SQL1",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        -2064,
+        864
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "mySql": {
+          "id": "RDuihR42NYbiVcxZ",
+          "name": "MySQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "12e5fdff-2fa0-408e-b382-ee336cd03cd4",
+              "leftValue": "={{ $json.rowCount }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1248,
+        864
+      ],
+      "id": "977bac89-985e-420e-9355-6f6f2115046e",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\n// Case 1: absolutely no items\nif (items.length === 0) {\n  return [{\n    json: {\n      hasRows: false,\n      rowCount: 0,\n    }\n  }];\n}\n\n// Case 2: n8n returns 1 “empty” item because of alwaysOutputData\nconst firstJson = items[0].json || {};\nconst isEmptyObject = Object.keys(firstJson).length === 0;\n\n// If first item has no columns, treat as no rows\nif (isEmptyObject) {\n  return [{\n    json: {\n      hasRows: false,\n      rowCount: 0,\n    }\n  }];\n}\n\n// Normal case: there *are* rows\nreturn [{\n  json: {\n    hasRows: true,\n    rowCount: items.length,\n    rows: items.map(i => i.json),\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1600,
+        864
+      ],
+      "id": "92dc1572-60fd-4422-9826-0b2a5afa9183",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        -496,
+        864
+      ],
+      "id": "cfa1c54f-4eef-4796-a150-073052a34fc2",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "6700ffbc-052a-44f8-99f3-ece432c4b975",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -2496,
+        -80
+      ],
+      "id": "e8803df5-97a2-4413-9e09-e5f37c00bcf2",
+      "name": "Webhook",
+      "webhookId": "6700ffbc-052a-44f8-99f3-ece432c4b975"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n    TABLE_NAME AS name,\n    TABLE_COMMENT AS comment\nFROM INFORMATION_SCHEMA.TABLES\nWHERE TABLE_SCHEMA = '{{ $node[\"Code in JavaScript2\"].json[\"dbName\"] }}'\n  AND TABLE_TYPE = 'BASE TABLE'\nORDER BY TABLE_NAME;",
+        "options": {}
+      },
+      "id": "8e2460d6-db72-4a37-804d-a144f73ddcb1",
+      "name": "Read Table List Only",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        -1600,
+        -352
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "RDuihR42NYbiVcxZ",
+          "name": "MySQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const upstream = $('Code in JavaScript2').first().json;\nconst tables = $input.all().map(item => ({\n  name: item.json.name,\n  comment: item.json.comment || 'No description'\n}));\n\nif (tables.length === 0) {\n  throw new Error('No tables found');\n}\n\nconst tableListText = tables.map(t => \n  `- ${t.name}: ${t.comment} (${t.row_count} rows)`\n).join('\\n');\n\nreturn [{\n  json: {\n    tableListText,\n    tableNames: tables.map(t => t.name),\n    userQuery: upstream.userQuery,\n    dbType: upstream.dbType,\n    dbSchema: upstream.dbSchema,  \n    dbName: upstream.dbName,\n    requestType: upstream.requestType,\n    lastSQL: upstream.lastSQL,\n    schemaTemplate: upstream.schemaTemplate\n  }\n}];"
+      },
+      "id": "5f37e310-2079-40d3-adbb-a12388dde483",
+      "name": "Format Table List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1232,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get all input items\nconst items = $input.all();\n\n// Initialize response structure\nlet response = {\n  status: \"success\",\n  message: \"\",\n  data: {\n    rowCount: 0,\n    rows: [],\n    sqlQuery: \"\",\n    explanation: \"\",\n    tablesUsed: []\n  }\n};\n\n// Get SQL query details from earlier node\ntry {\n  const sqlData = $('Validate SQL Safety1').first().json;\n  response.data.sqlQuery = sqlData.sqlQuery || \"\";\n  response.data.explanation = sqlData.explanation || \"\";\n  response.data.tablesUsed = sqlData.tablesUsed || [];\n} catch (e) {\n  console.warn(\"Could not get SQL details:\", e.message);\n}\n\n// Check if we have data from the \"Code in JavaScript\" node\nif (items.length > 0) {\n  const firstItem = items[0].json;\n  \n  if (firstItem.hasRows === false || firstItem.rowCount === 0) {\n    // No results case\n    response.message = \"Query executed successfully but returned no results\";\n    response.data.rowCount = 0;\n    response.data.rows = [];\n  } else {\n    // Has results case\n    response.message = `Query executed successfully. Found ${firstItem.rowCount} result(s)`;\n    response.data.rowCount = firstItem.rowCount;\n    response.data.rows = firstItem.rows || [];\n  }\n} else {\n  // Fallback: no items at all\n  response.status = \"error\";\n  response.message = \"No data received from query execution\";\n}\n\nreturn [{\n  json: response\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -896,
+        864
+      ],
+      "id": "2f41c5d8-9e3a-47c6-ae0b-fe3f3d3995c0",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const payload = $json.body ?? $json;\n\nif (!payload || typeof payload !== \"object\") {\n  throw new Error(\"Invalid or empty webhook payload\");\n}\n\n// --------------------\n// 2. NORMALIZE INPUTS\n// --------------------\nconst userQuery = (payload.query || \"\").trim();\nconst dbType = (payload.db_type || \"mysql\").toLowerCase().trim();\nconst dbName = (payload.db_name || \"\").trim();\n// NEW: Get schema from payload, default to 'public' for Postgres or dbName for MySQL\nconst dbSchema = (payload.db_schema || (dbType === 'postgresql' ? 'public' : dbName)).trim();\nconst requestType = payload.request_type || \"normal\";\n\nif (!userQuery) {\n  throw new Error(\"No user query provided\");\n}\n\n// --------------------\n// 3. CONVERSATION CONTEXT\n// --------------------\nconst history = Array.isArray(payload.conversation_history) ? payload.conversation_history : [];\nlet lastSQL = null;\n\nfor (let i = history.length - 1; i >= 0; i--) {\n  const h = history[i];\n  if (h?.role === \"assistant\" && h?.sql_query) {\n    lastSQL = h.sql_query;\n    break;\n  }\n}\n\n// --------------------\n// 4. DB-SPECIFIC QUERIES (Updated to use dbSchema)\n// --------------------\nconst schemaQueries = {\n  mysql: {\n    // MySQL uses dbName as the schema\n    tables: `SELECT TABLE_NAME AS name, TABLE_COMMENT AS comment, TABLE_ROWS AS row_count FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '${dbName}' AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME`,\n    schema: `SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_KEY, c.COLUMN_COMMENT, t.TABLE_COMMENT FROM INFORMATION_SCHEMA.COLUMNS c JOIN INFORMATION_SCHEMA.TABLES t ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME WHERE c.TABLE_SCHEMA = '${dbName}' AND c.TABLE_NAME IN ({{TABLES}}) ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION`\n  },\n\n  postgresql: {\n    // Postgres uses the specific dbSchema (e.g., 'public' or user defined)\n    tables: `SELECT tablename AS name, obj_description((schemaname||'.'||tablename)::regclass) AS comment, 0 AS row_count FROM pg_tables WHERE schemaname = '${dbSchema}' ORDER BY tablename`,\n    schema: `SELECT c.table_name AS TABLE_NAME, c.column_name AS COLUMN_NAME, c.data_type AS DATA_TYPE, c.is_nullable AS IS_NULLABLE, CASE WHEN pk.column_name IS NOT NULL THEN 'PRI' ELSE '' END AS COLUMN_KEY, '' AS COLUMN_COMMENT, '' AS TABLE_COMMENT FROM information_schema.columns c LEFT JOIN (SELECT ku.table_name, ku.column_name FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage ku ON tc.constraint_name = ku.constraint_name WHERE tc.constraint_type = 'PRIMARY KEY') pk ON c.table_name = pk.table_name AND c.column_name = pk.column_name WHERE c.table_schema = '${dbSchema}' AND c.table_name IN ({{TABLES}}) ORDER BY c.table_name, c.ordinal_position`\n  }\n};\n\nreturn [{\n    json: {\n      userQuery,\n      dbType,\n      dbName,\n      dbSchema, // 🔥 Pass this forward\n      requestType,\n      lastSQL,\n      tableQuery: schemaQueries[dbType].tables,\n      schemaTemplate: schemaQueries[dbType].schema\n    }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2224,
+        -80
+      ],
+      "id": "6168a957-4f4f-4e53-b94d-dec566159e84",
+      "name": "Code in JavaScript2"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n    c.relname AS name,\n    pg_catalog.obj_description(c.oid, 'pg_class') AS comment,\n    c.reltuples::bigint AS row_count\nFROM pg_catalog.pg_class c\nJOIN pg_catalog.pg_namespace n\n    ON n.oid = c.relnamespace\nWHERE c.relkind = 'r'\n  AND n.nspname = '{{ $node[\"Code in JavaScript2\"].json[\"dbSchema\"] }}'\nORDER BY c.relname;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1600,
+        -64
+      ],
+      "id": "664ff680-172e-4ccc-802d-31b863c6dd02",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "ryUe5dHnL9qpC4e4",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "0eb8a943-c4c5-44c8-8322-e69e672a0dde",
+              "leftValue": "={{ $('Validate Table Selection1').item.json.dbType }}",
+              "rightValue": "mysql",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -2528,
+        432
+      ],
+      "id": "f7ee1c99-b302-4842-b7db-10827da92f01",
+      "name": "If3"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n    c.table_name AS TABLE_NAME,\n    c.column_name AS COLUMN_NAME,\n    c.data_type AS DATA_TYPE,\n    c.is_nullable AS IS_NULLABLE,\n    CASE \n        WHEN EXISTS (\n            SELECT 1\n            FROM information_schema.table_constraints tc\n            JOIN information_schema.key_column_usage ku \n                ON tc.constraint_name = ku.constraint_name\n                AND tc.table_schema = ku.table_schema\n            WHERE tc.table_schema = c.table_schema\n              AND tc.table_name = c.table_name\n              AND ku.column_name = c.column_name\n              AND tc.constraint_type = 'PRIMARY KEY'\n        ) THEN 'PRI' \n        ELSE '' \n    END AS COLUMN_KEY,\n    '' AS COLUMN_COMMENT,\n    COALESCE(\n        obj_description((quote_ident(c.table_schema)||'.'||quote_ident(c.table_name))::regclass, 'pg_class'),\n        ''\n    ) AS TABLE_COMMENT\nFROM information_schema.columns c\nWHERE c.table_schema = '{{ $('Validate Table Selection1').item.json.dbSchema }}'\n  AND c.table_name = ANY({{ $('Validate Table Selection1').item.json.tableNamesForSQL }})\nORDER BY c.table_name, c.ordinal_position;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2128,
+        448
+      ],
+      "id": "05aa08c0-5e67-49f5-bcc3-e8db773fbf6f",
+      "name": "Execute a SQL query1",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "ryUe5dHnL9qpC4e4",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cdabffa7-82ac-428e-a48e-e246e7462923",
+              "leftValue": "={{ $('Validate SQL Safety1').item.json.dbType }}",
+              "rightValue": "mysql",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -2544,
+        880
+      ],
+      "id": "f9165e44-00d3-4ab5-b513-cbae7c049eee",
+      "name": "If4"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "2a5fb67c-9cc1-4542-b553-7a5d4f6c59d6",
+              "leftValue": "={{ $json.dbType }}",
+              "rightValue": "mysql",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1968,
+        -64
+      ],
+      "id": "154f2d17-fbda-4072-bc6e-8c33c76accde",
+      "name": "If2"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.sqlQuery }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2064,
+        1168
+      ],
+      "id": "6d788352-890b-4a5a-9221-ff8488a0c981",
+      "name": "Execute a SQL query2",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "ryUe5dHnL9qpC4e4",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "LLM Table Selector1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Select Relevant Tables1",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Relevant Tables1": {
+      "main": [
+        [
+          {
+            "node": "Validate Table Selection1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Table Selection1": {
+      "main": [
+        [
+          {
+            "node": "If3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Filtered Schema1": {
+      "main": [
+        [
+          {
+            "node": "Build Filtered Schema JSON1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Filtered Schema JSON1": {
+      "main": [
+        [
+          {
+            "node": "Universal SQL Agent1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate SQL (LLM)1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Universal SQL Agent1",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Universal SQL Agent1": {
+      "main": [
+        [
+          {
+            "node": "Validate SQL Safety1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate SQL Safety1": {
+      "main": [
+        [
+          {
+            "node": "If4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Generated SQL1": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Table List Only": {
+      "main": [
+        [
+          {
+            "node": "Format Table List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Table List": {
+      "main": [
+        [
+          {
+            "node": "Select Relevant Tables1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript2": {
+      "main": [
+        [
+          {
+            "node": "If2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query": {
+      "main": [
+        [
+          {
+            "node": "Format Table List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If3": {
+      "main": [
+        [
+          {
+            "node": "Read Filtered Schema1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute a SQL query1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query1": {
+      "main": [
+        [
+          {
+            "node": "Build Filtered Schema JSON1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If4": {
+      "main": [
+        [
+          {
+            "node": "Execute Generated SQL1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute a SQL query2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If2": {
+      "main": [
+        [
+          {
+            "node": "Read Table List Only",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query2": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "29951d05-059f-4e77-9303-2179c4fddfdf",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "b4014ee051fd78e43ccc9e0ba058ceb98ba0002058297943e9f1838316385f97"
+  },
+  "id": "QsGzHg0KRPxruotb",
+  "tags": []
+}
